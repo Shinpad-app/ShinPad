@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="en-GB">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Shinpad</title>
+<meta name="description" content="Team admin for grassroots football clubs: fixtures, availability, match sheets, awards and subs.">
+<meta name="theme-color" content="#14432A">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon-192.png">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Shinpad">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@600;700;800&family=Barlow:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<section id="gate"><div class="gate-card"><div class="brand big">Shinpad</div><p class="sub2">Loading…</p></div></section>
+<div id="appShell" hidden>
+<header>
+  <div class="brand">Shinpad</div>
+  <div class="club-name" id="clubName"></div>
+  <h1 style="margin:0"><button class="team-name" id="teamName" aria-label="Switch team">My Team ▾</button></h1>
+  <div class="sub" id="teamSub">Set up your club and teams in the Club tab</div>
+  <div id="nextUp"></div>
+  <span class="mode" id="mode"></span>
+</header>
+
+<main id="view" aria-live="polite"></main>
+
+<div id="composer">
+  <textarea id="msg" placeholder="Post to the team…" aria-label="Message"></textarea>
+  <label class="allclub"><input type="checkbox" id="allClub">All teams</label>
+  <button class="btn" id="send">Post</button>
+</div>
+
+<button class="fab" id="fab">+ New event</button>
+
+<nav>
+  <button data-tab="events" aria-current="page"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M3 10h18M8 3v4M16 3v4"/></svg>Events</button>
+  <button data-tab="squad"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M8 3 3 6l2 5 2-1v11h10V10l2 1 2-5-5-3a4 4 0 0 1-8 0Z"/></svg>Squad</button>
+  <button data-tab="train"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 20 12 4l6 16M8.5 14h7"/></svg>Training</button>
+  <button data-tab="awards"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M7 4h10v5a5 5 0 0 1-10 0ZM7 6H4a3 3 0 0 0 3 4m10-4h3a3 3 0 0 1-3 4M12 14v4m-4 2h8"/></svg>Awards</button>
+  <button data-tab="chat"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 5h16v11H9l-5 4Z"/></svg>Posts</button>
+  <button data-tab="club"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3 4 6v6c0 5 3.5 8 8 9 4.5-1 8-4 8-9V6Z"/></svg>Club</button>
+</nav>
+
+<dialog id="dlg"><form method="dialog" id="dlgForm"></form></dialog>
+
+</div>
+<div class="toast" id="toast"></div>
+<noscript>Shinpad needs JavaScript turned on.</noscript>
+<script type="module" src="app.js"></script>
+</body>
+</html>
