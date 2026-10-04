@@ -1,7 +1,22 @@
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
-import { getAuth, onAuthStateChanged, createUserWithEmailAndPassword, signInWithEmailAndPassword, signOut, updateProfile, sendPasswordResetEmail } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
-import { initializeFirestore, persistentLocalCache, persistentMultipleTabManager, collection, doc, getDoc, setDoc, updateDoc, deleteDoc, onSnapshot, arrayUnion } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+import { getAuth, onAuthStateChanged, createUserWithEmailAndPassword, signInWithEmailAndPassword, signOut, updateProfile, sendPasswordResetEmail, deleteUser, reauthenticateWithCredential, EmailAuthProvider } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
+import { initializeFirestore, persistentLocalCache, persistentMultipleTabManager, collection, doc, getDoc, setDoc, updateDoc, deleteDoc, onSnapshot, arrayUnion, arrayRemove, getDocs, query, where, deleteField } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import { firebaseConfig } from "./firebase-config.js";
+document.head.insertAdjacentHTML("beforeend",`<style>
+.poll .pq{font-weight:600;font-size:17px;margin:8px 0 2px}
+.opt{position:relative;display:flex;align-items:center;gap:8px;width:100%;margin-top:8px;padding:11px 12px;border:2px solid var(--rule);border-radius:10px;background:var(--card);overflow:hidden;text-align:left;font-weight:500}
+.opt .ofill{position:absolute;top:0;bottom:0;left:0;background:var(--pitch-2);opacity:.14;transition:width .3s}
+.opt.on{border-color:var(--pitch-2)}.opt.on .ofill{opacity:.26}
+.opt .otxt{position:relative;flex:1}.opt .ocount{position:relative;font-weight:700}
+.opt[disabled]{cursor:default}
+.onames{margin:4px 2px 0}
+.popt{border:1px solid var(--rule);border-radius:10px;padding:10px;background:var(--bg);font-weight:400}
+@media (prefers-reduced-motion:reduce){.opt .ofill{transition:none}}
+#teamLogo{position:absolute;right:16px;top:16px;width:64px;height:64px;border-radius:50%;object-fit:contain;background:#fff;padding:5px;z-index:2;box-shadow:0 2px 10px rgba(0,0,0,.25)}
+header.has-logo{padding-right:96px}
+.logo-sm{width:38px;height:38px;border-radius:50%;object-fit:contain;background:#fff;border:1px solid var(--rule);padding:2px;flex:0 0 38px}
+.logo-prev{width:72px;height:72px;border-radius:50%;object-fit:contain;background:#fff;border:1px solid var(--rule);padding:4px}
+</style>`);
 
 /* ================= built-in coaching content ================= */
 const FOCI=["All","Warm-up","Dribbling","Passing","Shooting","Defending","Goalkeeping","Games"];
@@ -87,9 +102,10 @@ const AGES=["U6","U7","U8","U9","U10","U11","U12","U13","U14","U15","U16","U17",
 function formatFor(a){const n=parseInt((a||"").replace("U",""));if(!n)return a==="Open age"?"11v11":"";return n<=7?"3v3":n<=9?"5v5":n<=11?"7v7":n<=13?"9v9":"11v11"}
 
 /* ================= data (Firestore) ================= */
-const COLS=["team","players","events","posts","drills","awards","members"];
+const COLS=["team","players","events","posts","polls","drills","awards","members"];
 const STAFF_COLS=["contacts","payments"];
-const S={team:[],players:[],events:[],posts:[],payments:[],drills:[],awards:[],members:[],contacts:[]};
+const S={polls:[],team:[],players:[],events:[],posts:[],payments:[],drills:[],awards:[],members:[],contacts:[]};
+const removedClubs=new Set();let justDeleted=false;
 let api=null,me=null,myId=null,clubId=null,clubDoc={},myRole=null,clubUnsubs=[],dataUnsubs=[],signingUp=false;
 const isStaff=()=>myRole==="admin"||myRole==="coach";
 const isAdmin=()=>myRole==="admin";
@@ -138,8 +154,8 @@ function seasonStats(from,to){
 let tab="events",focus="All",ageOnly=true;const open=new Set();
 let cur="info";try{cur=localStorage.getItem("shinpad-team")||"info"}catch(e){}
 function saveCur(){try{localStorage.setItem("shinpad-team",cur)}catch(e){}}
-function mine(c){return S[c].filter(x=>(c==="posts"&&x.teamId==="all")||(x.teamId||"info")===cur).map(x=>c==="awards"?{...x,id:x.month||x.id}:x)}
-const M={};["players","events","payments","posts","awards"].forEach(c=>Object.defineProperty(M,c,{get:()=>mine(c)}));
+function mine(c){return S[c].filter(x=>((c==="posts"||c==="polls")&&x.teamId==="all")||(x.teamId||"info")===cur).map(x=>c==="awards"?{...x,id:x.month||x.id}:x)}
+const M={};["players","events","payments","posts","polls","awards"].forEach(c=>Object.defineProperty(M,c,{get:()=>mine(c)}));
 const ageNum=a=>a==="Open age"?19:parseInt((a||"").replace("U",""))||0;
 const sortTeams=ts=>[...ts].sort((a,b)=>(ageNum(a.ageGroup)||50)-(ageNum(b.ageGroup)||50)||(a.name||"").localeCompare(b.name||""));
 const teams=()=>S.team;
@@ -152,6 +168,27 @@ function fixCur(){const ts=teams();if(ts.length&&!ts.find(t=>t.id===cur)){cur=so
 function drillRange(s){s=s||"";if(!s||/all/i.test(s))return[0,99];const p=s.split(/[–-]/).map(x=>/open/i.test(x)?99:parseInt(x.replace(/\D/g,"")));if(p.some(isNaN))return[0,99];return[p[0],p[1]??p[0]]}
 function suits(d){const n=ageNum(team().ageGroup);if(!n)return true;const[a,b]=drillRange(d.ages);return n>=a&&n<=b}
 
+/* ---------- logos (stored as small images inside the database, no paid storage needed) ---------- */
+const safeLogo=l=>typeof l==="string"&&/^data:image\/(png|jpeg);base64,[A-Za-z0-9+/=]+$/.test(l)?l:null;
+const logoFor=t=>safeLogo(t?.logo)||safeLogo(clubDoc.logo);
+async function fileToLogo(file){
+  if(!file||!file.size)return null;
+  if(!/^image\//.test(file.type))throw new Error("not an image");
+  const url=URL.createObjectURL(file);
+  try{
+    const img=await new Promise((res,rej)=>{const i=new Image();i.onload=()=>res(i);i.onerror=rej;i.src=url});
+    const SZ=192,c=document.createElement("canvas");c.width=c.height=SZ;
+    const x=c.getContext("2d"),r=Math.min(SZ/img.width,SZ/img.height),w=img.width*r,h=img.height*r;
+    x.drawImage(img,(SZ-w)/2,(SZ-h)/2,w,h);
+    let out=c.toDataURL("image/png");
+    if(out.length>180000){const c2=document.createElement("canvas");c2.width=c2.height=SZ;const y=c2.getContext("2d");y.fillStyle="#fff";y.fillRect(0,0,SZ,SZ);y.drawImage(c,0,0);out=c2.toDataURL("image/jpeg",.85)}
+    return out;
+  }finally{URL.revokeObjectURL(url)}
+}
+const logoField=(cur,label,note)=>`<div style="display:flex;gap:12px;align-items:center">${safeLogo(cur)?`<img class="logo-prev" alt="Current logo" src="${safeLogo(cur)}">`:""}<label style="flex:1">${label}<input type="file" name="logo" accept="image/png,image/jpeg,image/*"></label></div>
+  ${safeLogo(cur)?`<label class="check"><input type="checkbox" name="rmlogo"><span>Remove current logo</span></label>`:""}<p class="sub2" style="margin:0">${note} Only upload a badge your club owns or has permission to use.</p>`;
+async function logoFromForm(f,fd){try{const l=await fileToLogo(fd.get("logo"));if(l)return l;return f.rmlogo?null:undefined}catch(e){toast("That image couldn't be used. Try a PNG or JPG.");return undefined}}
+
 /* ================= views ================= */
 function render(){
   const v=$("#view"),t=team();
@@ -160,6 +197,8 @@ function render(){
   const label={events:"+ New event",squad:"+ Add player",train:"+ Add drill",club:"+ New payment",awards:"+ Monthly awards"}[tab];
   fab.style.display=label?"block":"none";fab.textContent=label||"";
   $("#teamName").textContent=(t.name||"My Team")+" ▾";
+  {let hl=$("#teamLogo");if(!hl){hl=document.createElement("img");hl.id="teamLogo";hl.alt="";document.querySelector("header").appendChild(hl)}
+   const lg=logoFor(t);hl.hidden=!lg;if(lg&&hl.getAttribute("src")!==lg)hl.src=lg;document.querySelector("header").classList.toggle("has-logo",!!lg)}
   $("#clubName").textContent=club().name||"";
   $("#mode").textContent=myRole==="admin"?"Club admin":myRole==="coach"?"Coach":"Parent / player";
   $("#teamSub").textContent=t.name||t.ageGroup?[t.ageGroup,formatFor(t.ageGroup),`${M.players.length} player${M.players.length===1?"":"s"}`].filter(Boolean).join(", "):"Set up your club and teams in the Club tab";
@@ -239,9 +278,35 @@ function trainView(){
 
 function renderPosts(){
   const v=$("#view");
-  const ps=[...M.posts].sort((a,b)=>b.at-a.at).slice(0,60);
-  if(!ps.length){v.innerHTML=`<div class="empty">No posts yet. Share kit reminders, pitch changes or match reports below.</div>`;return}
-  v.innerHTML=`<h2>Team posts</h2>`+ps.map(p=>`<div class="post"><div class="who"><span>${esc(p.authorName||"Club member")}</span><span class="when">${new Date(p.at).toLocaleString("en-GB",{day:"numeric",month:"short",hour:"2-digit",minute:"2-digit"})}</span></div>${p.teamId==="all"?`<span class="tag">All teams</span>`:""}<p>${esc(p.text)}</p>${(p.author===myId||isStaff())?`<button class="small-btn" data-delpost="${p.id}">Delete</button>`:""}</div>`).join("");
+  const items=[...M.posts.map(p=>({...p,kind:"post"})),...M.polls.map(p=>({...p,kind:"poll"}))].sort((a,b)=>b.at-a.at).slice(0,60);
+  const top=`<div style="display:flex;justify-content:space-between;align-items:center"><h2>Team posts</h2>${isStaff()?`<button class="pill-btn" id="newPoll">📊 New poll</button>`:""}</div>`;
+  if(!items.length){v.innerHTML=top+`<div class="empty">No posts yet. Share kit reminders, pitch changes or match reports below${isStaff()?", or ask the team a question with a poll":""}.</div>`;return}
+  v.innerHTML=top+items.map(p=>p.kind==="poll"?pollCard(p):postCard(p)).join("");
+}
+const whenStr=at=>new Date(at).toLocaleString("en-GB",{day:"numeric",month:"short",hour:"2-digit",minute:"2-digit"});
+function postCard(p){return `<div class="post"><div class="who"><span>${esc(p.authorName||"Club member")}</span><span class="when">${whenStr(p.at)}</span></div>${p.teamId==="all"?`<span class="tag">All teams</span>`:""}<p>${esc(p.text)}</p>${(p.author===myId||isStaff())?`<button class="small-btn" data-delpost="${p.id}">Delete</button>`:""}</div>`}
+function pollCard(p){
+  const votes=p.votes||{},opts=p.options||[],mine=votes[myId]||[];
+  const voted=Object.keys(votes).filter(k=>Array.isArray(votes[k])&&votes[k].length);
+  const counts=opts.map((_,i)=>voted.filter(k=>votes[k].includes(i)).length);
+  const nm=id=>S.members.find(m=>m.id===id)?.name||"Former member";
+  return `<div class="post poll"><div class="who"><span>${esc(p.authorName||"Coach")}</span><span class="when">${whenStr(p.at)}</span></div>${p.teamId==="all"?`<span class="tag">All teams</span>`:""}
+  <p class="pq">📊 ${esc(p.question)}</p><div class="sub2">${p.closed?"Poll closed":p.multi?"Choose as many as you like":"Choose one"}</div>
+  ${opts.map((o,i)=>{const pct=voted.length?Math.round(counts[i]/voted.length*100):0,on=mine.includes(i);
+    const names=p.showNames?voted.filter(k=>votes[k].includes(i)).map(nm):[];
+    return `<button class="opt ${on?"on":""}" data-vote="${p.id}|${i}" ${p.closed?"disabled":""} aria-pressed="${on}"><span class="ofill" style="width:${pct}%"></span><span class="otxt">${on?"✓ ":""}${esc(o)}</span><span class="ocount">${counts[i]}</span></button>${names.length?`<div class="sub2 onames">${names.map(esc).join(", ")}</div>`:""}`}).join("")}
+  <div class="sub2" style="margin-top:8px">${voted.length} ${voted.length===1?"person has":"people have"} voted${p.showNames?"":". Votes are anonymous"}</div>
+  ${isStaff()?`<button class="small-btn" data-closepoll="${p.id}">${p.closed?"Reopen poll":"Close poll"}</button> <button class="small-btn" data-delpoll="${p.id}">Delete</button>`:""}</div>`;
+}
+function pollForm(){
+  sheet(`<h3>New poll</h3><label>Question<input name="q" required maxlength="200" placeholder="e.g. Which date suits for the end-of-season party?"></label>
+  <div id="pollOpts" style="display:grid;gap:8px">${[1,2,3].map(n=>`<input class="popt" name="o" maxlength="80" aria-label="Option ${n}" placeholder="Option ${n}" ${n<3?"required":""}>`).join("")}</div>
+  <button type="button" class="pill-btn" id="addOpt">+ Add option</button>
+  <label class="check"><input type="checkbox" name="multi"><span>Allow more than one answer</span></label>
+  <label class="check"><input type="checkbox" name="names" checked><span>Show who voted for what</span></label>
+  <label class="check"><input type="checkbox" name="all"><span>Send to all teams in the club</span></label>`,
+  (o,fd)=>{const opts=fd.getAll("o").map(x=>x.trim()).filter(Boolean);if(!o.q.trim()||opts.length<2){toast("Add a question and at least two options");return}
+    run(api.add("polls",{teamId:fd.get("all")?"all":cur,question:o.q.trim(),options:opts,multi:!!fd.get("multi"),showNames:!!fd.get("names"),votes:{},closed:false,author:myId,authorName:myName(),at:Date.now()}));toast("Poll posted")},"Post poll");
 }
 
 function clubView(){
@@ -263,12 +328,12 @@ function clubView(){
     ${wName?`<div>Welfare officer: ${esc(wName)}${wPhone?`, <a href="tel:${esc(wPhone)}">${esc(wPhone)}</a>`:""}</div>`:`<div class="sub2">Add your club welfare officer so parents know who to contact with a concern.</div>`}
     <button class="pill-btn" id="editClub">Edit club details</button></div>
   <h2>Teams</h2><div class="board">${teamList().map(x=>{const np=S.players.filter(p=>(p.teamId||"info")===x.id).length;
-    return `<div class="row"><span class="shirt age">${esc(x.ageGroup==="Open age"?"Open":x.ageGroup||"–")}</span><span class="nm">${esc(x.name||"My Team")}<div class="sub2">${esc([formatFor(x.ageGroup),x.coach&&"Coach: "+x.coach,np+(np===1?" player":" players")].filter(Boolean).join(", "))}</div></span>
+    return `<div class="row">${logoFor(x)?`<img class="logo-sm" alt="" src="${logoFor(x)}">`:`<span class="shirt age">${esc(x.ageGroup==="Open age"?"Open":x.ageGroup||"–")}</span>`}<span class="nm">${esc(x.name||"My Team")}<div class="sub2">${esc([formatFor(x.ageGroup),x.coach&&"Coach: "+x.coach,np+(np===1?" player":" players")].filter(Boolean).join(", "))}</div></span>
     ${x.id===cur?`<span class="viewing">Viewing</span>`:`<button class="pill-btn" style="margin:0" data-switch="${x.id}">View</button>`}<button class="del" data-editteam="${x.id}" aria-label="Edit ${esc(x.name||"team")}">✎</button>${teams().length>1?`<button class="del" data-delteam="${x.id}" aria-label="Delete ${esc(x.name||"team")}">×</button>`:""}</div>`}).join("")}</div>
   <button class="pill-btn" id="addTeam">+ Add a team</button>
   ${isAdmin()?`<h2>People</h2><div class="info">Invite code <b class="code">${esc(clubDoc.inviteCode||"")}</b><div class="sub2">Parents and players join with this code. They can see events, reply with availability, volunteer and post. Make someone a coach below to let them manage teams.</div><button class="pill-btn" id="shareInvite">Share invite link</button><button class="pill-btn" id="newCode">Change code</button></div>
   <div class="board">${[...S.members].sort((a,b)=>(a.name||"").localeCompare(b.name||"")).map(m=>`<div class="row"><span class="nm">${esc(m.name||"Member")}${m.id===myId?" (you)":""}</span>${m.id===myId?`<span class="viewing">${esc(m.role)}</span>`:`<select class="role" data-role="${m.id}" aria-label="Role for ${esc(m.name||"member")}">${["parent","coach","admin"].map(r=>`<option value="${r}" ${m.role===r?"selected":""}>${r[0].toUpperCase()+r.slice(1)}</option>`).join("")}</select><button class="del" data-delmember="${m.id}" aria-label="Remove ${esc(m.name||"member")}">×</button>`}</div>`).join("")}</div>`:""}
-  <h2>Your account</h2><div class="info"><div><b>${esc(myName())}</b></div><div class="sub2">${esc(me?.email||"")}</div><button class="pill-btn" id="signOut">Sign out</button></div>
+  <h2>Your account</h2><div class="info"><div><b>${esc(myName())}</b></div><div class="sub2">${esc(me?.email||"")}</div><button class="pill-btn" id="signOut">Sign out</button><button class="pill-btn" id="deleteAccount" style="border-color:var(--no);color:var(--no)">Delete my account</button></div>
   <h2>Season so far: ${esc(t.name||"My Team")}</h2><div class="info"><div class="record"><div><b>${played.length}</b>Played</div><div><b>${w}</b>Won</div><div><b>${dr}</b>Drawn</div><div><b>${l}</b>Lost</div></div>
     <p class="sub2" style="margin:8px 0 0">Goals for ${gf}, against ${ga}.${ageNum(t.ageGroup)&&ageNum(t.ageGroup)<12?" Many younger age groups don't publish results, so this stays inside the team.":""}</p>
     ${isStaff()&&M.players.length?`<button class="pill-btn" id="exportStats">Download squad stats (CSV)</button>`:""}</div>
@@ -337,9 +402,9 @@ function postAward(id){
 }
 
 /* ================= sheets (dialogs) ================= */
-function sheet(html,onSave){
+function sheet(html,onSave,okLabel="Save"){
   const f=$("#dlgForm");
-  f.innerHTML=html+`<div class="actions"><button class="btn alt" value="cancel" formnovalidate>Cancel</button><button class="btn" value="ok">Save</button></div>`;
+  f.innerHTML=html+`<div class="actions"><button class="btn alt" value="cancel" formnovalidate>Cancel</button><button class="btn" value="ok">${okLabel}</button></div>`;
   const d=$("#dlg");d.returnValue="";
   d.onclose=()=>{if(d.returnValue==="ok"){const fd=new FormData(f);onSave(Object.fromEntries(fd),fd)}};
   d.showModal();
@@ -401,20 +466,24 @@ function clubForm(){
   const c=club(),lg=legacy();
   sheet(`<h3>Club details</h3><label>Club name<input name="name" value="${esc(c.name||"")}" placeholder="e.g. Riverside Juniors FC"></label>
   <label>Main ground<input name="ground" value="${esc(c.ground??lg.ground??"")}"></label>
-  <div class="two"><label>Welfare officer<input name="welfare" value="${esc(c.welfare??lg.welfare??"")}"></label><label>Their phone<input name="welfarePhone" type="tel" value="${esc(c.welfarePhone??lg.welfarePhone??"")}"></label></div>`,
-  f=>run(updateDoc(doc(db,"clubs",clubId),{name:f.name.trim(),ground:f.ground.trim(),welfare:f.welfare.trim(),welfarePhone:f.welfarePhone.trim()})));
+  <div class="two"><label>Welfare officer<input name="welfare" value="${esc(c.welfare??lg.welfare??"")}"></label><label>Their phone<input name="welfarePhone" type="tel" value="${esc(c.welfarePhone??lg.welfarePhone??"")}"></label></div>
+  ${logoField(c.logo,"Club badge","Shows on every team unless a team has its own logo.")}`,
+  async(f,fd)=>{const d={name:f.name.trim(),ground:f.ground.trim(),welfare:f.welfare.trim(),welfarePhone:f.welfarePhone.trim()};
+    const l=await logoFromForm(f,fd);if(l!==undefined)d.logo=l;run(updateDoc(doc(db,"clubs",clubId),d))});
 }
 function teamForm(t){
   const isNew=!t;t=t||{};
   sheet(`<h3>${isNew?"Add a team":"Edit team"}</h3><label>Team name<input name="name" required value="${esc(t.name||"")}" placeholder="e.g. U12 Lions, Ladies, Vets"></label>
   <div class="two"><label>Age group<select name="ageGroup"><option value="">Choose…</option>${AGES.map(a=>`<option ${t.ageGroup===a?"selected":""}>${a}</option>`).join("")}</select></label><label>Coach or manager<input name="coach" value="${esc(t.coach||"")}"></label></div>
-  <label>Home ground, if different from the club's<input name="ground" value="${esc(t.ground||"")}"></label>`,
-  async f=>{const d={name:f.name.trim(),ageGroup:f.ageGroup,coach:f.coach.trim(),ground:f.ground.trim()};
+  <label>Home ground, if different from the club's<input name="ground" value="${esc(t.ground||"")}"></label>
+  ${logoField(t.logo,"Team logo (optional)","Leave empty to use the club badge.")}`,
+  async(f,fd)=>{const d={name:f.name.trim(),ageGroup:f.ageGroup,coach:f.coach.trim(),ground:f.ground.trim()};
+    const l=await logoFromForm(f,fd);if(l!==undefined)d.logo=l;
     if(isNew){const id="t"+Math.random().toString(36).slice(2,9);await run(api.set("team",id,d));cur=id;saveCur();open.clear();render();toast("Added "+d.name)}
     else{const{id,...rest}=t;run(api.set("team",t.id,{...rest,...d}))}});
 }
 function teamSwitch(){
-  sheet(`<h3>Switch team</h3>${teamList().map(x=>`<label class="check"><input type="radio" name="t" value="${x.id}" ${x.id===cur?"checked":""}><span><b>${esc(x.name||"My Team")}</b><br><span class="sub2">${esc([x.ageGroup,formatFor(x.ageGroup)].filter(Boolean).join(", ")||"Age group not set")}</span></span></label>`).join("")}<p class="sub2" style="margin:0">Add more teams from the Club tab.</p>`,
+  sheet(`<h3>Switch team</h3>${teamList().map(x=>`<label class="check"><input type="radio" name="t" value="${x.id}" ${x.id===cur?"checked":""}>${logoFor(x)?`<img class="logo-sm" alt="" src="${logoFor(x)}">`:""}<span><b>${esc(x.name||"My Team")}</b><br><span class="sub2">${esc([x.ageGroup,formatFor(x.ageGroup)].filter(Boolean).join(", ")||"Age group not set")}</span></span></label>`).join("")}<p class="sub2" style="margin:0">Add more teams from the Club tab.</p>`,
   f=>{if(f.t&&f.t!==cur)switchTo(f.t)});
 }
 function switchTo(id){cur=id;saveCur();open.clear();render();window.scrollTo(0,0);toast("Now viewing "+(team().name||"My Team"))}
@@ -435,6 +504,8 @@ document.addEventListener("click",ev=>{
   if(b.id==="teamName"){teamSwitch();return}
   if(b.dataset.switch){switchTo(b.dataset.switch);return}
   if(b.dataset.toggle){open.has(b.dataset.toggle)?open.delete(b.dataset.toggle):open.add(b.dataset.toggle);render();return}
+  if(b.id==="signOut"){if(confirm("Sign out of Shinpad?"))signOut(auth);return}
+  if(b.id==="deleteAccount"){deleteAccountFlow();return}
   if(!api)return;
   const d=b.dataset,ev_=id=>M.events.find(x=>x.id===id);
   if(d.rsvp){const[e,p,v]=d.rsvp.split("|");const cur=ev_(e)?.responses?.[p];run(api.update("events",e,{responses:{[p]:cur===v?null:v}}))}
@@ -449,12 +520,17 @@ document.addEventListener("click",ev=>{
   else if(d.delev&&confirm("Delete this event?"))run(api.remove("events",d.delev));
   else if(d.delp&&confirm("Remove this player?"))run(Promise.all([api.remove("players",d.delp),api.remove("contacts",d.delp)]));
   else if(d.delpay&&confirm("Delete this payment?"))run(api.remove("payments",d.delpay));
+  else if(b.id==="newPoll")pollForm();
+  else if(b.id==="addOpt"){const w=$("#pollOpts");if(w&&w.children.length<8){const n=w.children.length+1;w.insertAdjacentHTML("beforeend",`<input class="popt" name="o" maxlength="80" aria-label="Option ${n}" placeholder="Option ${n}">`);w.lastElementChild.focus()}else toast("Up to 8 options")}
+  else if(d.vote){const[id,i]=d.vote.split("|"),p=S.polls.find(x=>x.id===id);if(!p||p.closed)return;const ix=+i,cur0=(p.votes||{})[myId]||[];
+    const next=p.multi?(cur0.includes(ix)?cur0.filter(x=>x!==ix):[...cur0,ix].sort()):(cur0.includes(ix)?[]:[ix]);run(api.update("polls",id,{votes:{[myId]:next}}))}
+  else if(d.closepoll){const p=S.polls.find(x=>x.id===d.closepoll);if(p)run(api.update("polls",p.id,{closed:!p.closed}))}
+  else if(d.delpoll&&confirm("Delete this poll and its votes?"))run(api.remove("polls",d.delpoll));
   else if(d.delpost&&confirm("Delete this post?"))run(api.remove("posts",d.delpost));
   else if(d.deldrill&&confirm("Delete this drill?"))run(api.remove("drills",d.deldrill));
   else if(b.id==="fab")({events:newEvent,squad:()=>playerForm(),train:newDrill,club:newPayment,awards:()=>awardForm()})[tab]?.();
   else if(b.id==="editClub")clubForm();
   else if(b.id==="addTeam")teamForm();
-  else if(b.id==="signOut"){if(confirm("Sign out of Shinpad?"))signOut(auth)}
   else if(b.id==="shareInvite")shareInvite();
   else if(b.id==="newCode"){if(confirm("Change the invite code? The old code will stop working."))changeCode()}
   else if(d.delmember){const m=S.members.find(x=>x.id===d.delmember);if(confirm(`Remove ${m?.name||"this member"} from the club?`))run(api.remove("members",d.delmember))}
@@ -506,7 +582,7 @@ async function boot(user){
   try{const us=await getDoc(doc(db,"users",myId));if(us.exists())ud=us.data();else await setDoc(doc(db,"users",myId),{name:user.displayName||"",clubs:[]})}catch(e){console.warn(e)}
   const join=new URLSearchParams(location.search).get("join");
   if(join)return joinClub(join);
-  const list=ud.clubs||[];let saved=null;try{saved=localStorage.getItem("shinpad-club")}catch(e){}
+  const list=(ud.clubs||[]).filter(c=>!removedClubs.has(c));let saved=null;try{saved=localStorage.getItem("shinpad-club")}catch(e){}
   const cid=list.includes(saved)?saved:list[0];
   if(!cid)return onboard();
   openClub(cid);
@@ -521,7 +597,7 @@ function onboard(code=""){
   <label>Your first team<input name="team" required placeholder="e.g. U10 Lions"></label>
   <label>Age group<select name="age" required><option value="">Choose…</option>${AGES.map(a=>`<option>${a}</option>`).join("")}</select></label>
   <button class="btn">Create club</button></form>
-  <p class="sub2"><button class="link" id="signOut">Sign out</button></p></div>`);
+  <p class="sub2"><button class="link" id="signOut">Sign out</button> · <button class="link" id="deleteAccount" style="color:var(--no)">Delete my account</button></p></div>`);
   $("#joinForm").onsubmit=e=>{e.preventDefault();joinClub(new FormData(e.target).get("code"))};
   $("#clubForm").onsubmit=e=>{e.preventDefault();const f=Object.fromEntries(new FormData(e.target));e.target.querySelector("button").disabled=true;createClub(f).catch(err=>{console.error(err);toast("Couldn't create the club – try again");e.target.querySelector("button").disabled=false})};
 }
@@ -558,6 +634,72 @@ async function shareInvite(){
   else{try{await navigator.clipboard.writeText(text+"\n"+url);toast("Invite copied – paste it into your team chat")}catch(e){prompt("Copy this invite",url)}}
 }
 
+/* ---------- delete my account ---------- */
+async function deleteAccountFlow(){
+  const back=()=>{if(clubId&&myRole)showApp();else onboard()};
+  showGate(`<div class="gate-card"><div class="brand big">Shinpad</div><h1 class="gate-title">Delete your account</h1><p class="sub2">Checking your clubs…</p></div>`);
+  let ud={clubs:[]};try{const s=await getDoc(doc(db,"users",myId));if(s.exists())ud=s.data()}catch(e){}
+  const clubs=[...new Set([...(ud.clubs||[]),clubId].filter(c=>c&&!removedClubs.has(c)))];
+  const solo=[];
+  for(const cid of clubs){try{
+    const m=await getDoc(doc(db,"clubs",cid,"members",myId));
+    if(!m.exists()||m.data().role!=="admin")continue;
+    const ms=await getDocs(collection(db,"clubs",cid,"members"));
+    if(ms.docs.filter(d=>d.data().role==="admin").length===1){const c=await getDoc(doc(db,"clubs",cid));solo.push({id:cid,name:c.data()?.name||"your club",members:ms.size})}
+  }catch(e){console.warn(e)}}
+  showGate(`<div class="gate-card"><div class="brand big">Shinpad</div><h1 class="gate-title">Delete your account</h1>
+  <p class="sub2">This permanently deletes your Shinpad account, removes you from your clubs and deletes your posts. It can't be undone.</p>
+  ${solo.map(c=>`<div class="info" style="border-color:var(--no)"><b>You're the only admin of ${esc(c.name)}.</b> Deleting your account will also delete the whole club: every team, player, contact, event and record${c.members>1?`, for all ${c.members} members`:""}. To keep the club, cancel and make another member an admin in Club, then People.</div>`).join("")}
+  <form id="delForm" class="gate-form"><label>Type DELETE to confirm<input name="confirm" required autocomplete="off" autocapitalize="characters"></label>
+  <label>Your password<input name="password" type="password" required autocomplete="current-password"></label>
+  <button class="btn" style="background:var(--no)">Delete my account</button></form>
+  <p class="sub2"><button class="link" id="delCancel">Cancel and go back</button></p></div>`);
+  $("#delCancel").onclick=back;
+  $("#delForm").onsubmit=e=>{e.preventDefault();const f=Object.fromEntries(new FormData(e.target));
+    if(f.confirm.trim().toUpperCase()!=="DELETE"){toast("Type DELETE to confirm");return}
+    doDeleteAccount(f.password,clubs,solo.map(c=>c.id),back)};
+}
+async function deleteClubData(cid){
+  for(const c of ["players","contacts","events","posts","polls","payments","drills","awards","team"]){
+    const s=await getDocs(collection(db,"clubs",cid,c));
+    await Promise.all(s.docs.map(d=>deleteDoc(d.ref)));
+  }
+  const ms=await getDocs(collection(db,"clubs",cid,"members"));
+  await Promise.all(ms.docs.filter(d=>d.id!==myId).map(d=>deleteDoc(d.ref)));
+  const cs=await getDoc(doc(db,"clubs",cid)),code=cs.data()?.inviteCode;
+  if(code)await deleteDoc(doc(db,"inviteCodes",code)).catch(()=>{});
+  await deleteDoc(doc(db,"clubs",cid));
+  await deleteDoc(doc(db,"clubs",cid,"members",myId));
+}
+async function doDeleteAccount(password,clubs,soloIds,back){
+  showGate(`<div class="gate-card"><div class="brand big">Shinpad</div><h1 class="gate-title">Deleting your account…</h1><p class="sub2" id="delStatus">Checking your password</p></div>`);
+  const st=t=>{const e=$("#delStatus");if(e)e.textContent=t};
+  try{await reauthenticateWithCredential(auth.currentUser,EmailAuthProvider.credential(auth.currentUser.email,password))}
+  catch(err){toast(authMsg(err.code));return back()}
+  stopAll();
+  try{
+    for(const cid of clubs){
+      if(soloIds.includes(cid)){st("Deleting your club's data");await deleteClubData(cid)}
+      else{
+        st("Removing you from your clubs");
+        const ps=await getDocs(query(collection(db,"clubs",cid,"posts"),where("author","==",myId)));
+        await Promise.all(ps.docs.map(d=>deleteDoc(d.ref)));
+        const pl=await getDocs(collection(db,"clubs",cid,"polls"));
+        await Promise.all(pl.docs.filter(d=>(d.data().votes||{})[myId]!==undefined).map(d=>updateDoc(d.ref,{["votes."+myId]:deleteField()})));
+        await deleteDoc(doc(db,"clubs",cid,"members",myId));
+      }
+    }
+    st("Deleting your account");
+    await deleteDoc(doc(db,"users",myId));
+    try{localStorage.removeItem("shinpad-club");localStorage.removeItem("shinpad-team")}catch(e){}
+    justDeleted=true;
+    await deleteUser(auth.currentUser);
+  }catch(err){
+    console.error(err);justDeleted=false;
+    showGate(`<div class="gate-card"><div class="brand big">Shinpad</div><h1 class="gate-title">Something went wrong</h1><p class="sub2">Your account was only partly deleted. Check your signal and try again, or email us and we'll finish it for you.</p><div class="gate-form"><button class="btn" id="deleteAccount">Try again</button></div><p class="sub2"><button class="link" id="signOut">Sign out</button></p></div>`);
+  }
+}
+
 function stopAll(){[...clubUnsubs,...dataUnsubs].forEach(u=>u());clubUnsubs=[];dataUnsubs=[];Object.keys(S).forEach(k=>S[k]=[]);clubDoc={};myRole=null;api=null}
 function startData(){
   dataUnsubs.forEach(u=>u());dataUnsubs=[];
@@ -568,11 +710,11 @@ function openClub(cid){
   stopAll();clubId=cid;tab="events";open.clear();document.querySelectorAll("nav button").forEach(x=>x.dataset.tab==="events"?x.setAttribute("aria-current","page"):x.removeAttribute("aria-current"));try{localStorage.setItem("shinpad-club",cid)}catch(e){}
   api=clubApi(cid);
   clubUnsubs.push(onSnapshot(doc(db,"clubs",cid,"members",myId),s=>{
-    if(!s.exists()){stopAll();toast("You're not a member of that club");return onboard()}
+    if(!s.exists()){stopAll();removedClubs.add(cid);try{localStorage.removeItem("shinpad-club")}catch(e){}updateDoc(doc(db,"users",myId),{clubs:arrayRemove(cid)}).catch(()=>{}).finally(()=>{toast("You're no longer a member of that club");boot(me)});return}
     const r=s.data().role;if(r!==myRole){myRole=r;document.body.classList.toggle("parent",!isStaff());startData();showApp()}
   },e=>{console.warn(e);onboard()}));
   clubUnsubs.push(onSnapshot(doc(db,"clubs",cid),s=>{clubDoc=s.data()||{};render()},e=>console.warn(e)));
 }
 
-onAuthStateChanged(auth,u=>{if(signingUp)return;if(u)boot(u);else{stopAll();me=null;myId=null;authScreen("in")}});
+onAuthStateChanged(auth,u=>{if(signingUp)return;if(u)boot(u);else{stopAll();me=null;myId=null;authScreen("in");if(justDeleted){justDeleted=false;toast("Your account has been deleted")}}});
 if("serviceWorker" in navigator)navigator.serviceWorker.register("sw.js").catch(()=>{});
